@@ -19,6 +19,7 @@ export class SkyFrontendStack extends Stack {
 
     const oai = new cloudfront.OriginAccessIdentity(this, 'OAI');
     bucket.grantRead(oai);
+
     const distribution = new cloudfront.Distribution(this, 'SkyFrontendDistribution', {
       defaultRootObject: 'index.html',
       defaultBehavior: {
@@ -28,8 +29,11 @@ export class SkyFrontendStack extends Stack {
       },
     });
 
+    const REPO_ROOT = path.join(process.cwd(),"..");
+    const FRONTEND_ASSETS = path.join(REPO_ROOT, 'sky-frontend/out');
+
     new s3deploy.BucketDeployment(this, 'DeployStaticAssets', {
-      sources: [s3deploy.Source.asset(path.join(__dirname, '../../sky-frontend/out'))],
+      sources: [s3deploy.Source.asset(FRONTEND_ASSETS)],
       destinationBucket: bucket,
       distribution,
       distributionPaths: ['/*'],
