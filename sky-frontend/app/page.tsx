@@ -74,7 +74,7 @@ async function postData(apilink: string, requestBody: string) {
     }
 
     const data = await response.json();
-    console.log("Response:", data);
+    alert("Response: " + JSON.stringify(data));
     return data;
   } catch (err) {
     console.error("Error posting data:", err);
