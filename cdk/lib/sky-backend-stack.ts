@@ -3,6 +3,7 @@ import * as lambda from 'aws-cdk-lib/aws-lambda';
 import * as apigateway from 'aws-cdk-lib/aws-apigateway';
 import { Construct } from 'constructs';
 import * as path from 'path';
+import * as wafv2 from 'aws-cdk-lib/aws-wafv2';
 
 export class SkyBackendStack extends cdk.Stack {
   public readonly apiUrl: cdk.CfnOutput;
@@ -32,5 +33,41 @@ export class SkyBackendStack extends cdk.Stack {
     this.apiUrl = new cdk.CfnOutput(this, 'ApiUrl', {
       value: api.url,
     });
+
+    // adding rate limiting to my API gateway: 30 requests per IP per minute
+    const webAcl = new wafv2.CfnWebACL(this, 'WebAcl', {
+                    defaultAction: { allow: {} },
+                    scope: 'REGIONAL',
+                    visibilityConfig: {
+                      cloudWatchMetricsEnabled: true,
+                      metricName: 'webAcl',
+                      sampledRequestsEnabled: true,
+                    },
+                    rules: [
+                      {
+                        name: 'RateLimitRule',
+                        priority: 1,
+                        action: { block: {} },
+                        statement: {
+                          rateBasedStatement: {
+                            limit: 30,               // 30 requests
+                            aggregateKeyType: 'IP',  // per IP
+                          },
+                        },
+                        visibilityConfig: {
+                          cloudWatchMetricsEnabled: true,
+                          metricName: 'rateLimit',
+                          sampledRequestsEnabled: true,
+                        },
+                      },
+                    ],
+                  });
+      
+      new wafv2.CfnWebACLAssociation(this, 'WebAclAssociation', {
+              resourceArn: `arn:aws:apigateway:${this.region}::/restapis/${api.restApiId}/stages/${api.deploymentStage.stageName}`,
+              webAclArn: webAcl.attrArn,
+            });
+
+
   }
 }
