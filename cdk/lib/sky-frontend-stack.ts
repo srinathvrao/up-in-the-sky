@@ -7,8 +7,13 @@ import * as origins from 'aws-cdk-lib/aws-cloudfront-origins';
 import { Construct } from 'constructs';
 import * as path from 'path';
 
+export interface SkyFrontendStackProps extends cdk.StackProps {
+  apiUrl: string;
+}
+
+
 export class SkyFrontendStack extends Stack {
-  constructor(scope: Construct, id: string, props?: StackProps) {
+  constructor(scope: Construct, id: string, props: SkyFrontendStackProps) {
     super(scope, id, props);
 
     const bucket = new s3.Bucket(this, 'SkyFrontendBucket', {
@@ -31,13 +36,17 @@ export class SkyFrontendStack extends Stack {
 
     const REPO_ROOT = path.join(process.cwd(),"..");
     const FRONTEND_ASSETS = path.join(REPO_ROOT, 'sky-frontend/out');
-
-    new s3deploy.BucketDeployment(this, 'DeployStaticAssets', {
-      sources: [s3deploy.Source.asset(FRONTEND_ASSETS)],
-      destinationBucket: bucket,
-      distribution,
-      distributionPaths: ['/*'],
-    });
+    const configFileContent = `window._env_ = { REACT_APP_API_URL: '${props.apiUrl}' };`;
+    
+    new s3deploy.BucketDeployment(this, 'DeployFrontend', {
+                  sources: [
+                    s3deploy.Source.asset(FRONTEND_ASSETS),
+                    s3deploy.Source.data('config.js', configFileContent),
+                  ],
+                  destinationBucket: bucket,
+                  distribution,
+                  distributionPaths: ['/*'],
+                });
 
     new cdk.CfnOutput(this, 'CloudFrontURL', {
       value: distribution.distributionDomainName,
