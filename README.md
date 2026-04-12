@@ -1,6 +1,6 @@
 # up-in-the-sky ✈️
 
-See what planes are flying above you — right now, based on your network location.
+See what planes are flying above you - right now, based on your network location.
 
 ## What it does
 
@@ -10,15 +10,15 @@ up-in-the-sky detects your approximate location from your network (IP-based geol
 
 ```
 sky-frontend/       # TypeScript/React UI
-sky-backend/        # Java Lambda — fetches and serves flight data
-cdk/                # AWS CDK stack — infrastructure as code
+sky-backend/        # Java Lambda - fetches and serves flight data
+cdk/                # AWS CDK stack - infrastructure as code
 ```
 
 The app is fully serverless:
 
-- **Frontend** — TypeScript/React app that fetches your network location and calls the backend API
-- **Backend** — Java AWS Lambda that queries a flight data API for aircraft near the given coordinates
-- **Infrastructure** — AWS CDK provisions the Lambda, API Gateway, and any supporting resources
+- **Frontend** - TypeScript/React app that fetches your network location and calls the backend API
+- **Backend** - Java AWS Lambda that queries a flight data API for aircraft near the given coordinates
+- **Infrastructure** - AWS CDK provisions the Lambda, API Gateway, and any supporting resources
 
 ## Getting Started
 
