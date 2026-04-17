@@ -1,8 +1,8 @@
-# CDK TypeScript Template
+# Welcome to your CDK TypeScript project
 
-This lets me spin up a website with cloudfront.
+This is a blank project for CDK development with TypeScript.
 
-The `cdk.json` file tells the CDK Toolkit how to execute the app.
+The `cdk.json` file tells the CDK Toolkit how to execute your app.
 
 ## Useful commands
 
