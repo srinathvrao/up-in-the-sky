@@ -1,0 +1,49 @@
+name: Deploy
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  cdk-deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install CDK deps
+        run: npm ci
+        working-directory: cdk
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/github-actions-flight-tracker
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Write Anthropic API key to SSM
+        run: |
+          aws ssm put-parameter \
+            --name "/flighttracker/anthropic-api-key" \
+            --value "${{ secrets.ANTHROPIC_API_KEY }}" \
+            --type SecureString \
+            --overwrite
+
+      - name: Deploy data-stack
+        run: npx cdk deploy data-stack --require-approval never
+        working-directory: cdk
+
+      - name: Deploy api-stack
+        run: npx cdk deploy api-stack --require-approval never
+        working-directory: cdk
+
+      - name: Deploy compute-stack
+        run: npx cdk deploy compute-stack --require-approval never
+        working-directory: cdk
