@@ -102,7 +102,7 @@ export class DataStack extends cdk.Stack {
           image: lambda.Runtime.JAVA_21.bundlingImage,
           command: [
             '/bin/sh', '-c',
-            'mvn clean package -q -DskipTests && cp target/poller-lambda.jar /asset-output/',
+            'mvn clean package -q -DskipTests -Dmaven.repo.local=/tmp/m2 && cp target/poller-lambda.jar /asset-output/',
           ],
         },
       }),
@@ -135,7 +135,7 @@ export class DataStack extends cdk.Stack {
           image: lambda.Runtime.JAVA_21.bundlingImage,
           command: [
             '/bin/sh', '-c',
-            'mvn clean package -q -DskipTests && cp target/normalizer-lambda.jar /asset-output/',
+            'mvn clean package -q -DskipTests -Dmaven.repo.local=/tmp/m2 && cp target/normalizer-lambda.jar /asset-output/',
           ],
         },
       }),
