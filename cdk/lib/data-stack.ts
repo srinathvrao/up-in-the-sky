@@ -116,7 +116,6 @@ export class DataStack extends cdk.Stack {
       }),
       timeout: cdk.Duration.seconds(60),
       memorySize: 512,
-      reservedConcurrentExecutions: 1,
       environment: {
         KINESIS_STREAM_NAME: this.stream.streamName,
         POLL_CENTER_LAT: '39.0',
