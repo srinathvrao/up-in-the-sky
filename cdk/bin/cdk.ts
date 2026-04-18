@@ -13,4 +13,4 @@ const env = {
 
 const dataStack = new DataStack(app, 'data-stack', { env });
 const apiStack = new ApiStack(app, 'api-stack', { env });
-new ComputeStack(app, 'compute-stack', { env });
+new ComputeStack(app, 'compute-stack', { env, aircraftTable: dataStack.aircraftTable });
