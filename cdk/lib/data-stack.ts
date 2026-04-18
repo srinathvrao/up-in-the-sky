@@ -35,6 +35,13 @@ export class DataStack extends cdk.Stack {
       removalPolicy: cdk.RemovalPolicy.DESTROY,
     });
 
+    // GSI for callsign lookups (used by MCP get_aircraft_position tool)
+    this.aircraftTable.addGlobalSecondaryIndex({
+      indexName: 'callsign-index',
+      partitionKey: { name: 'callsign', type: dynamodb.AttributeType.STRING },
+      projectionType: dynamodb.ProjectionType.ALL,
+    });
+
     // S3 archive bucket for Firehose
     this.archiveBucket = new s3.Bucket(this, 'PositionsArchive', {
       bucketName: `up-in-the-sky-positions-${this.account}-${this.region}`,
@@ -105,15 +112,7 @@ export class DataStack extends cdk.Stack {
       functionName: 'flight-poller',
       runtime: lambda.Runtime.JAVA_21,
       handler: 'com.upinthesky.poller.PollerHandler::handleRequest',
-      code: lambda.Code.fromAsset(path.join(__dirname, '../../services/poller-lambda'), {
-        bundling: {
-          image: lambda.Runtime.JAVA_21.bundlingImage,
-          command: [
-            '/bin/sh', '-c',
-            'mvn clean package -q -DskipTests -Dmaven.repo.local=/tmp/m2 && cp target/poller-lambda.jar /asset-output/',
-          ],
-        },
-      }),
+      code: lambda.Code.fromAsset(path.join(__dirname, '../../services/poller-lambda/target/poller-lambda.jar')),
       timeout: cdk.Duration.seconds(60),
       memorySize: 512,
       environment: {
@@ -137,15 +136,7 @@ export class DataStack extends cdk.Stack {
       functionName: 'flight-normalizer',
       runtime: lambda.Runtime.JAVA_21,
       handler: 'com.upinthesky.normalizer.NormalizerHandler::handleRequest',
-      code: lambda.Code.fromAsset(path.join(__dirname, '../../services/normalizer-lambda'), {
-        bundling: {
-          image: lambda.Runtime.JAVA_21.bundlingImage,
-          command: [
-            '/bin/sh', '-c',
-            'mvn clean package -q -DskipTests -Dmaven.repo.local=/tmp/m2 && cp target/normalizer-lambda.jar /asset-output/',
-          ],
-        },
-      }),
+      code: lambda.Code.fromAsset(path.join(__dirname, '../../services/normalizer-lambda/target/normalizer-lambda.jar')),
       timeout: cdk.Duration.seconds(60),
       memorySize: 512,
       environment: {
