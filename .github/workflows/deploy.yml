@@ -18,6 +18,18 @@ jobs:
         with:
           node-version: '20'
 
+      - uses: actions/setup-java@v4
+        with:
+          java-version: '21'
+          distribution: 'corretto'
+          cache: maven
+
+      - name: Build Lambda JARs
+        run: |
+          mvn clean package -q -DskipTests -f services/poller-lambda/pom.xml
+          mvn clean package -q -DskipTests -f services/normalizer-lambda/pom.xml
+          mvn clean package -q -DskipTests -f services/mcp-lambda/pom.xml
+
       - name: Install CDK deps
         run: npm ci
         working-directory: cdk
