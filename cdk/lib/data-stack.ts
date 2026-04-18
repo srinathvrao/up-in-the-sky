@@ -49,6 +49,10 @@ export class DataStack extends cdk.Stack {
       assumedBy: new iam.ServicePrincipal('firehose.amazonaws.com'),
     });
     this.stream.grantRead(firehoseRole);
+    firehoseRole.addToPolicy(new iam.PolicyStatement({
+      actions: ['kinesis:DescribeStream'],
+      resources: [this.stream.streamArn],
+    }));
     this.archiveBucket.grantWrite(firehoseRole);
 
     const firehoseLogGroup = new logs.LogGroup(this, 'FirehoseLogGroup', {
