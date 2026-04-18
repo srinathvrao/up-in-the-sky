@@ -22,7 +22,6 @@ export class DataStack extends cdk.Stack {
 
     // Kinesis Data Stream — 1 shard, 24h retention, partition by icao24
     this.stream = new kinesis.Stream(this, 'FlightStream', {
-      streamName: 'flight-positions',
       shardCount: 1,
       retentionPeriod: cdk.Duration.hours(24),
     });
@@ -72,7 +71,6 @@ export class DataStack extends cdk.Stack {
 
     // Firehose: Kinesis → S3, partitioned by time, 5-min or 128MB buffers
     new firehose.CfnDeliveryStream(this, 'FlightFirehose', {
-      deliveryStreamName: 'flight-positions-archive',
       deliveryStreamType: 'KinesisStreamAsSource',
       kinesisStreamSourceConfiguration: {
         kinesisStreamArn: this.stream.streamArn,
