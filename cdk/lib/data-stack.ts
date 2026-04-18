@@ -70,7 +70,7 @@ export class DataStack extends cdk.Stack {
     }));
 
     // Firehose: Kinesis → S3, partitioned by time, 5-min or 128MB buffers
-    new firehose.CfnDeliveryStream(this, 'FlightFirehose', {
+    const flightFirehose = new firehose.CfnDeliveryStream(this, 'FlightFirehose', {
       deliveryStreamType: 'KinesisStreamAsSource',
       kinesisStreamSourceConfiguration: {
         kinesisStreamArn: this.stream.streamArn,
@@ -93,6 +93,12 @@ export class DataStack extends cdk.Stack {
         },
       },
     });
+    // Firehose validates IAM at creation time — ensure the role's DefaultPolicy
+    // is fully applied before CloudFormation attempts to create the delivery stream.
+    const firehoseDefaultPolicy = firehoseRole.node.tryFindChild('DefaultPolicy') as iam.Policy;
+    if (firehoseDefaultPolicy) {
+      flightFirehose.node.addDependency(firehoseDefaultPolicy);
+    }
 
     // Poller Lambda — runs for 55s per invocation, polls adsb.lol every 2s
     const pollerLambda = new lambda.Function(this, 'PollerLambda', {
