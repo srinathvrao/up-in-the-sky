@@ -7,18 +7,10 @@ from boto3.dynamodb.conditions import Attr
 from decimal import Decimal
 from fastapi import FastAPI, Query
 from fastapi.responses import StreamingResponse
-from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import AsyncGenerator
 
 app = FastAPI()
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
 
 MODEL_ID = os.environ.get("MODEL_ID", "claude-sonnet-4-20250514")
 MCP_LAMBDA_ARN = os.environ.get("MCP_LAMBDA_ARN", "")
