@@ -10,8 +10,6 @@ import com.upinthesky.normalizer.model.RouteInfo;
 import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.services.dynamodb.DynamoDbClient;
 import software.amazon.awssdk.services.dynamodb.model.AttributeValue;
-import software.amazon.awssdk.services.dynamodb.model.GetItemRequest;
-import software.amazon.awssdk.services.dynamodb.model.GetItemResponse;
 import software.amazon.awssdk.services.dynamodb.model.PutItemRequest;
 
 import java.nio.charset.StandardCharsets;
@@ -38,6 +36,10 @@ public class NormalizerHandler implements RequestHandler<KinesisEvent, String> {
     private static final ConcurrentHashMap<String, long[]> writeCache = new ConcurrentHashMap<>();
     private static final long MIN_WRITE_INTERVAL_SEC = 30;
     private static final double MIN_POSITION_DELTA_DEG = 0.01; // ~1 km
+
+    // In-memory route cache: icao24 → [routeUpdatedAtEpoch, origin, destination]
+    // Avoids a DynamoDB GetItem on every aircraft upsert to check/fetch route freshness.
+    private static final ConcurrentHashMap<String, Object[]> routeCache = new ConcurrentHashMap<>();
 
     private final RouteEnricher routeEnricher = new RouteEnricher();
 
@@ -124,51 +126,33 @@ public class NormalizerHandler implements RequestHandler<KinesisEvent, String> {
         if (a.getTrack() != null) item.put("track", num(String.valueOf(a.getTrack())));
         item.put("onGround", bool(a.isOnGround()));
 
-        if (callsign != null && !callsign.isBlank() && shouldRefreshRoute(icao24, now)) {
+        Object[] cached = routeCache.get(icao24);
+        boolean routeStale = cached == null || (now - (long) cached[0]) > ROUTE_REFRESH_SECONDS;
+
+        if (callsign != null && !callsign.isBlank() && routeStale) {
             try {
                 RouteInfo route = routeEnricher.fetchRoute(callsign);
                 if (route != null && route.getOrigin() != null) {
-                    item.put("origin", str(route.getOrigin().getIata()));
-                    item.put("destination", str(route.getDestination().getIata()));
-                    item.put("routeUpdatedAt", str(Instant.now().toString()));
+                    String origin = route.getOrigin().getIata();
+                    String destination = route.getDestination().getIata();
+                    String routeUpdatedAt = Instant.now().toString();
+                    item.put("origin", str(origin));
+                    item.put("destination", str(destination));
+                    item.put("routeUpdatedAt", str(routeUpdatedAt));
+                    routeCache.put(icao24, new Object[]{now, origin, destination});
+                } else {
+                    routeCache.put(icao24, new Object[]{now, null, null});
                 }
             } catch (Exception e) {
                 context.getLogger().log("Route enrichment failed for " + callsign + ": " + e.getMessage() + "\n");
+                routeCache.put(icao24, new Object[]{now, null, null});
             }
-        } else {
-            Map<String, AttributeValue> existing = getExistingRoute(icao24);
-            if (existing != null) {
-                if (existing.containsKey("origin")) item.put("origin", existing.get("origin"));
-                if (existing.containsKey("destination")) item.put("destination", existing.get("destination"));
-                if (existing.containsKey("routeUpdatedAt")) item.put("routeUpdatedAt", existing.get("routeUpdatedAt"));
-            }
+        } else if (cached != null && cached[1] != null) {
+            item.put("origin", str((String) cached[1]));
+            item.put("destination", str((String) cached[2]));
         }
 
         dynamoDb.putItem(PutItemRequest.builder().tableName(TABLE_NAME).item(item).build());
-    }
-
-    private boolean shouldRefreshRoute(String icao24, long nowEpochSeconds) {
-        Map<String, AttributeValue> existing = getExistingRoute(icao24);
-        if (existing == null || !existing.containsKey("routeUpdatedAt")) return true;
-        try {
-            long routeAge = nowEpochSeconds - Instant.parse(existing.get("routeUpdatedAt").s()).getEpochSecond();
-            return routeAge > ROUTE_REFRESH_SECONDS;
-        } catch (Exception e) {
-            return true;
-        }
-    }
-
-    private Map<String, AttributeValue> getExistingRoute(String icao24) {
-        try {
-            GetItemResponse response = dynamoDb.getItem(GetItemRequest.builder()
-                    .tableName(TABLE_NAME)
-                    .key(Map.of("icao24", str(icao24)))
-                    .projectionExpression("origin, destination, routeUpdatedAt")
-                    .build());
-            return response.hasItem() ? response.item() : null;
-        } catch (Exception e) {
-            return null;
-        }
     }
 
     private static AttributeValue str(String s) { return AttributeValue.builder().s(s).build(); }
