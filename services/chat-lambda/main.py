@@ -1,8 +1,11 @@
 import json
 import os
+import time
 import boto3
 import anthropic
-from fastapi import FastAPI
+from boto3.dynamodb.conditions import Attr
+from decimal import Decimal
+from fastapi import FastAPI, Query
 from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -227,6 +230,58 @@ async def chat(request: ChatRequest) -> StreamingResponse:
             "Connection": "keep-alive",
         },
     )
+
+
+AIRCRAFT_TABLE = os.environ.get("AIRCRAFT_TABLE_NAME", "Aircraft")
+_ddb_resource = None
+
+
+def get_aircraft_table():
+    global _ddb_resource
+    if _ddb_resource is None:
+        _ddb_resource = boto3.resource("dynamodb")
+    return _ddb_resource.Table(AIRCRAFT_TABLE)
+
+
+def decimal_to_float(obj):
+    if isinstance(obj, Decimal):
+        return float(obj)
+    if isinstance(obj, dict):
+        return {k: decimal_to_float(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [decimal_to_float(i) for i in obj]
+    return obj
+
+
+@app.get("/aircraft")
+async def get_aircraft(
+    min_lat: float = Query(...),
+    max_lat: float = Query(...),
+    min_lon: float = Query(...),
+    max_lon: float = Query(...),
+):
+    table = get_aircraft_table()
+    now = int(time.time())
+
+    items: list[dict] = []
+    kwargs: dict = {
+        "FilterExpression": (
+            Attr("lat").between(Decimal(str(min_lat)), Decimal(str(max_lat)))
+            & Attr("lon").between(Decimal(str(min_lon)), Decimal(str(max_lon)))
+            & Attr("ttl").gt(now)
+        ),
+        "ProjectionExpression": "icao24, callsign, lat, lon, altitude, groundSpeed, track, onGround, updatedAt",
+    }
+
+    while True:
+        resp = table.scan(**kwargs)
+        items.extend(resp.get("Items", []))
+        last_key = resp.get("LastEvaluatedKey")
+        if not last_key:
+            break
+        kwargs["ExclusiveStartKey"] = last_key
+
+    return {"aircraft": decimal_to_float(items)}
 
 
 @app.get("/health")

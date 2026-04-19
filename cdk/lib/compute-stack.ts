@@ -18,6 +18,7 @@ export class ComputeStack extends cdk.Stack {
 
     new ChatService(this, 'ChatService', {
       mcpLambdaArn: mcpServer.lambdaFunction.functionArn,
+      aircraftTable: props.aircraftTable,
     });
   }
 }
