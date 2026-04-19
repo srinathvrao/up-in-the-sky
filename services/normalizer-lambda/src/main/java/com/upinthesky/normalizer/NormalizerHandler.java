@@ -21,6 +21,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicInteger;
 
 public class NormalizerHandler implements RequestHandler<KinesisEvent, String> {
 
@@ -34,10 +35,16 @@ public class NormalizerHandler implements RequestHandler<KinesisEvent, String> {
     private static final long ROUTE_REFRESH_SECONDS = 3600L;
 
     // In-memory dedup cache: icao24 → [lastWriteEpochSec, latBits, lonBits]
-    // Skips DynamoDB write when position hasn't changed meaningfully.
     private static final ConcurrentHashMap<String, long[]> writeCache = new ConcurrentHashMap<>();
     private static final long MIN_WRITE_INTERVAL_SEC = 30;
-    private static final double MIN_POSITION_DELTA_DEG = 0.01; // ~1 km
+    private static final double MIN_POSITION_DELTA_DEG = 0.01;
+
+    // Route timestamp cache: icao24 → routeUpdatedAt epoch sec (-1 = no route)
+    // Avoids a DynamoDB GetItem on every aircraft just to check route age.
+    private static final ConcurrentHashMap<String, Long> routeAgeCache = new ConcurrentHashMap<>();
+
+    // Cap route API calls per invocation to avoid blowing the Lambda timeout on cold starts.
+    private static final int MAX_ROUTE_LOOKUPS_PER_INVOCATION = 10;
 
     private final RouteEnricher routeEnricher = new RouteEnricher();
 
@@ -46,6 +53,7 @@ public class NormalizerHandler implements RequestHandler<KinesisEvent, String> {
         int processed = 0;
         int skipped = 0;
         int errors = 0;
+        AtomicInteger routeLookups = new AtomicInteger(0);
 
         for (KinesisEvent.KinesisEventRecord record : event.getRecords()) {
             try {
@@ -61,7 +69,7 @@ public class NormalizerHandler implements RequestHandler<KinesisEvent, String> {
                     if (aircraft.getLat() == null || aircraft.getLon() == null) continue;
 
                     if (shouldWrite(aircraft.getHex().toLowerCase(), aircraft.getLat(), aircraft.getLon())) {
-                        upsertAircraft(aircraft, context);
+                        upsertAircraft(aircraft, context, routeLookups);
                         processed++;
                     } else {
                         skipped++;
@@ -72,7 +80,8 @@ public class NormalizerHandler implements RequestHandler<KinesisEvent, String> {
                 context.getLogger().log("Normalize error: " + e.getMessage() + "\n");
             }
         }
-        context.getLogger().log(String.format("processed=%d skipped=%d errors=%d%n", processed, skipped, errors));
+        context.getLogger().log(String.format("processed=%d skipped=%d errors=%d routeLookups=%d%n",
+                processed, skipped, errors, routeLookups.get()));
         return String.format("processed=%d skipped=%d errors=%d", processed, skipped, errors);
     }
 
@@ -106,7 +115,7 @@ public class NormalizerHandler implements RequestHandler<KinesisEvent, String> {
         });
     }
 
-    private void upsertAircraft(Aircraft a, Context context) {
+    private void upsertAircraft(Aircraft a, Context context, AtomicInteger routeLookups) {
         String icao24 = a.getHex().toLowerCase();
         String callsign = a.getFlight();
         long now = Instant.now().getEpochSecond();
@@ -124,19 +133,50 @@ public class NormalizerHandler implements RequestHandler<KinesisEvent, String> {
         if (a.getTrack() != null) item.put("track", num(String.valueOf(a.getTrack())));
         item.put("onGround", bool(a.isOnGround()));
 
-        if (callsign != null && !callsign.isBlank() && shouldRefreshRoute(icao24, now)) {
+        // Single DynamoDB read: fetch existing record for route fields.
+        // routeAgeCache avoids re-reading DynamoDB on warm invocations for aircraft we've already processed.
+        boolean needsRouteRefresh = false;
+        Map<String, AttributeValue> existing = null;
+
+        if (callsign != null && !callsign.isBlank()) {
+            Long cachedRouteAge = routeAgeCache.get(icao24);
+            if (cachedRouteAge == null) {
+                // Not in route cache — read DynamoDB once to get both route fields and route age.
+                existing = getExistingRecord(icao24);
+                if (existing != null && existing.containsKey("routeUpdatedAt")) {
+                    try {
+                        long routeAge = now - Instant.parse(existing.get("routeUpdatedAt").s()).getEpochSecond();
+                        routeAgeCache.put(icao24, now - routeAge);
+                        needsRouteRefresh = routeAge > ROUTE_REFRESH_SECONDS;
+                    } catch (Exception e) {
+                        needsRouteRefresh = true;
+                    }
+                } else {
+                    needsRouteRefresh = true;
+                }
+            } else {
+                needsRouteRefresh = (now - cachedRouteAge) > ROUTE_REFRESH_SECONDS;
+            }
+        }
+
+        if (needsRouteRefresh && routeLookups.get() < MAX_ROUTE_LOOKUPS_PER_INVOCATION) {
             try {
                 RouteInfo route = routeEnricher.fetchRoute(callsign);
                 if (route != null && route.getOrigin() != null) {
                     item.put("origin", str(route.getOrigin().getIata()));
                     item.put("destination", str(route.getDestination().getIata()));
                     item.put("routeUpdatedAt", str(Instant.now().toString()));
+                    routeAgeCache.put(icao24, now);
                 }
+                routeLookups.incrementAndGet();
             } catch (Exception e) {
                 context.getLogger().log("Route enrichment failed for " + callsign + ": " + e.getMessage() + "\n");
             }
-        } else {
-            Map<String, AttributeValue> existing = getExistingRoute(icao24);
+        } else if (!needsRouteRefresh) {
+            // Copy route fields from existing record (already fetched above) or from nothing.
+            if (existing == null) {
+                existing = getExistingRecord(icao24);
+            }
             if (existing != null) {
                 if (existing.containsKey("origin")) item.put("origin", existing.get("origin"));
                 if (existing.containsKey("destination")) item.put("destination", existing.get("destination"));
@@ -147,18 +187,7 @@ public class NormalizerHandler implements RequestHandler<KinesisEvent, String> {
         dynamoDb.putItem(PutItemRequest.builder().tableName(TABLE_NAME).item(item).build());
     }
 
-    private boolean shouldRefreshRoute(String icao24, long nowEpochSeconds) {
-        Map<String, AttributeValue> existing = getExistingRoute(icao24);
-        if (existing == null || !existing.containsKey("routeUpdatedAt")) return true;
-        try {
-            long routeAge = nowEpochSeconds - Instant.parse(existing.get("routeUpdatedAt").s()).getEpochSecond();
-            return routeAge > ROUTE_REFRESH_SECONDS;
-        } catch (Exception e) {
-            return true;
-        }
-    }
-
-    private Map<String, AttributeValue> getExistingRoute(String icao24) {
+    private Map<String, AttributeValue> getExistingRecord(String icao24) {
         try {
             GetItemResponse response = dynamoDb.getItem(GetItemRequest.builder()
                     .tableName(TABLE_NAME)
