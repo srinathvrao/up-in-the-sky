@@ -213,10 +213,28 @@ async def stream_chat(request: ChatRequest) -> AsyncGenerator[bytes, None]:
         yield sse("error", {"message": f"{type(e).__name__}: {e}"})
 
 
+async def stream_mock(request: ChatRequest) -> AsyncGenerator[bytes, None]:
+    """Simulates a full streaming response with tool use for testing without live API."""
+    import asyncio
+    words = ["Sure!", "Here", "is", "what", "I", "found", "about", "your", "query."]
+    for word in words:
+        yield sse("token", {"text": word + " "})
+        await asyncio.sleep(0.05)
+    yield sse("tool_start", {"name": "get_flight_status"})
+    await asyncio.sleep(0.1)
+    yield sse("tool_end", {"name": "get_flight_status"})
+    follow = ["Based", "on", "live", "data,", "the", "flight", "is", "at", "35,000", "ft."]
+    for word in follow:
+        yield sse("token", {"text": word + " "})
+        await asyncio.sleep(0.05)
+    yield sse("done", {})
+
+
 @app.post("/chat")
-async def chat(request: ChatRequest) -> StreamingResponse:
+async def chat(request: ChatRequest, mock: bool = False) -> StreamingResponse:
+    generator = stream_mock(request) if mock else stream_chat(request)
     return StreamingResponse(
-        stream_chat(request),
+        generator,
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
