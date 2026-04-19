@@ -1,4 +1,4 @@
-import { FlightBoard } from "@/app/components/FlightBoard/FlightBoard";
+import { FlightMap } from "@/app/components/FlightMap/FlightMap";
 import { ChatPanel } from "@/app/components/Chat/ChatPanel";
 
 export default function Home() {
@@ -16,9 +16,9 @@ export default function Home() {
 
       {/* Main split panel */}
       <main className="flex flex-1 overflow-hidden">
-        {/* Flight Board — left panel */}
+        {/* Flight Map — left panel */}
         <section className="flex-1 border-r border-gray-800 overflow-hidden">
-          <FlightBoard />
+          <FlightMap />
         </section>
 
         {/* Chat — right panel */}
