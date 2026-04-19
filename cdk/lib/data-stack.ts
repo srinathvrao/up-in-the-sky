@@ -137,7 +137,7 @@ export class DataStack extends cdk.Stack {
       runtime: lambda.Runtime.JAVA_21,
       handler: 'com.upinthesky.normalizer.NormalizerHandler::handleRequest',
       code: lambda.Code.fromAsset(path.join(__dirname, '../../services/normalizer-lambda/target/normalizer-lambda.jar')),
-      timeout: cdk.Duration.seconds(60),
+      timeout: cdk.Duration.seconds(300),
       memorySize: 512,
       environment: {
         AIRCRAFT_TABLE_NAME: this.aircraftTable.tableName,
@@ -145,10 +145,11 @@ export class DataStack extends cdk.Stack {
     });
     this.aircraftTable.grantReadWriteData(normalizerLambda);
 
-    // Kinesis event source: batch size 100, bisect on error for resilience
+    // Kinesis event source: smaller batch + 10s window keeps invocations well under timeout
     normalizerLambda.addEventSource(new lambdaEventSources.KinesisEventSource(this.stream, {
       startingPosition: lambda.StartingPosition.LATEST,
-      batchSize: 100,
+      batchSize: 50,
+      maxBatchingWindow: cdk.Duration.seconds(10),
       bisectBatchOnError: true,
     }));
   }
