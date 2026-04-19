@@ -34,6 +34,8 @@ public class PollerHandler implements RequestHandler<Map<String, Object>, String
     // EventBridge minimum schedule is 1 minute; loop internally for 2-second cadence
     private static final long LOOP_DURATION_MS = 55_000L;
     private static final int POLL_INTERVAL_MS = 2_000;
+    // Pack 200 aircraft per Kinesis record — avoids 5 KB/record minimum billing on small records
+    private static final int AIRCRAFT_PER_RECORD = 200;
     private static final int KINESIS_BATCH_LIMIT = 500;
 
     private final AdsbApiClient apiClient = new AdsbApiClient();
@@ -72,13 +74,15 @@ public class PollerHandler implements RequestHandler<Map<String, Object>, String
     }
 
     private int pushToKinesis(List<Aircraft> aircraft) throws Exception {
-        List<PutRecordsRequestEntry> entries = new ArrayList<>(aircraft.size());
-        for (Aircraft a : aircraft) {
-            if (a.getHex() == null || a.getHex().isBlank()) continue;
-            String json = mapper.writeValueAsString(a);
+        // Chunk aircraft into batches of AIRCRAFT_PER_RECORD and write each chunk as one Kinesis record.
+        // Each ~46 KB record is billed at actual size rather than the 5 KB minimum per-record.
+        List<PutRecordsRequestEntry> entries = new ArrayList<>();
+        for (int i = 0; i < aircraft.size(); i += AIRCRAFT_PER_RECORD) {
+            List<Aircraft> chunk = aircraft.subList(i, Math.min(i + AIRCRAFT_PER_RECORD, aircraft.size()));
+            String json = mapper.writeValueAsString(chunk);
             entries.add(PutRecordsRequestEntry.builder()
                     .data(SdkBytes.fromUtf8String(json))
-                    .partitionKey(a.getHex())
+                    .partitionKey("batch-" + (i / AIRCRAFT_PER_RECORD))
                     .build());
         }
 
@@ -90,7 +94,7 @@ public class PollerHandler implements RequestHandler<Map<String, Object>, String
                     .streamName(STREAM_NAME)
                     .records(batch)
                     .build());
-            pushed += batch.size() - response.failedRecordCount();
+            pushed += (batch.size() - response.failedRecordCount()) * AIRCRAFT_PER_RECORD;
         }
         return pushed;
     }

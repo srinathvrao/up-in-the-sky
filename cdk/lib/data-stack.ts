@@ -114,7 +114,7 @@ export class DataStack extends cdk.Stack {
       handler: 'com.upinthesky.poller.PollerHandler::handleRequest',
       code: lambda.Code.fromAsset(path.join(__dirname, '../../services/poller-lambda/target/poller-lambda.jar')),
       timeout: cdk.Duration.seconds(60),
-      memorySize: 512,
+      memorySize: 256,
       environment: {
         KINESIS_STREAM_NAME: this.stream.streamName,
         POLL_CENTER_LAT: '39.0',
