@@ -21,6 +21,11 @@ interface AircraftUpdateEvent {
   data: AircraftData;
 }
 
+interface AircraftBatchEvent {
+  type: "aircraft_batch";
+  data: AircraftData[];
+}
+
 interface UseWebSocketReturn {
   aircraft: Map<string, AircraftData>;
   status: WsStatus;
@@ -51,11 +56,17 @@ export function useWebSocket(url: string | undefined): UseWebSocketReturn {
 
     ws.onmessage = (event) => {
       try {
-        const msg: AircraftUpdateEvent = JSON.parse(event.data);
+        const msg: AircraftUpdateEvent | AircraftBatchEvent = JSON.parse(event.data);
         if (msg.type === "aircraft_update") {
           setAircraft((prev) => {
             const next = new Map(prev);
             next.set(msg.data.icao24, msg.data);
+            return next;
+          });
+        } else if (msg.type === "aircraft_batch") {
+          setAircraft((prev) => {
+            const next = new Map(prev);
+            for (const ac of msg.data) next.set(ac.icao24, ac);
             return next;
           });
         }

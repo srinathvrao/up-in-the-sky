@@ -9,6 +9,9 @@ from botocore.exceptions import ClientError
 CONNECTIONS_TABLE = os.environ["CONNECTIONS_TABLE"]
 WS_MANAGEMENT_ENDPOINT = os.environ["WS_MANAGEMENT_ENDPOINT"]
 
+# API GW WebSocket max payload is 128 KB; ~160 bytes/aircraft → ~800 per chunk
+CHUNK_SIZE = 700
+
 _ddb = None
 _apigw = None
 
@@ -29,14 +32,16 @@ def get_apigw():
     return _apigw
 
 
-def build_ws_message(ac: dict) -> bytes | None:
+def normalize(ac: dict) -> dict | None:
     hex_id = (ac.get("hex") or "").strip().lower()
     if not hex_id or ac.get("lat") is None or ac.get("lon") is None:
         return None
 
     alt_baro = ac.get("alt_baro")
-    on_ground = alt_baro == "ground"
-    altitude = 0 if on_ground else (int(alt_baro) if isinstance(alt_baro, (int, float)) else 0)
+    on_ground = ac.get("onGround") if "onGround" in ac else (alt_baro == "ground")
+    altitude = ac.get("altitudeFeet") or (
+        0 if on_ground else (int(alt_baro) if isinstance(alt_baro, (int, float)) else 0)
+    )
 
     polled_at = ac.get("polledAt")
     updated_at = (
@@ -45,41 +50,63 @@ def build_ws_message(ac: dict) -> bytes | None:
         else time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
     )
 
-    msg = {
-        "type": "aircraft_update",
-        "data": {
-            "icao24": hex_id,
-            "callsign": (ac.get("flight") or "").strip(),
-            "lat": ac.get("lat", 0),
-            "lon": ac.get("lon", 0),
-            "altitude": altitude,
-            "groundSpeed": int(ac.get("gs") or 0),
-            "track": int(ac.get("track") or 0),
-            "onGround": on_ground,
-            "updatedAt": updated_at,
-        },
+    return {
+        "icao24": hex_id,
+        "callsign": (ac.get("flight") or "").strip(),
+        "lat": ac.get("lat", 0),
+        "lon": ac.get("lon", 0),
+        "altitude": altitude,
+        "groundSpeed": int(ac.get("gs") or 0),
+        "track": int(ac.get("track") or 0),
+        "onGround": bool(on_ground),
+        "updatedAt": updated_at,
     }
-    return json.dumps(msg).encode("utf-8")
+
+
+def send_to_connection(conn_id: str, chunks: list[bytes]) -> bool:
+    """Returns True if connection is stale."""
+    apigw = get_apigw()
+    for chunk in chunks:
+        try:
+            apigw.post_to_connection(ConnectionId=conn_id, Data=chunk)
+        except ClientError as e:
+            code = e.response["Error"]["Code"]
+            if code in ("GoneException", "410"):
+                return True
+            print(f"post error {conn_id}: {e}")
+    return False
 
 
 def handler(event, context):
-    # Decode all Kinesis records into aircraft objects
-    aircraft_list: list[dict] = []
+    # Decode Kinesis records, deduplicate by icao24 (last write wins)
+    seen: dict[str, dict] = {}
     for record in event.get("Records", []):
         try:
             raw = base64.b64decode(record["kinesis"]["data"]).decode("utf-8")
             parsed = json.loads(raw)
-            if isinstance(parsed, list):
-                aircraft_list.extend(parsed)
-            elif isinstance(parsed, dict):
-                aircraft_list.append(parsed)
+            items = parsed if isinstance(parsed, list) else [parsed]
+            for ac in items:
+                hex_id = (ac.get("hex") or "").strip().lower()
+                if hex_id:
+                    seen[hex_id] = ac
         except Exception as e:
             print(f"decode error: {e}")
 
-    if not aircraft_list:
+    if not seen:
         return
 
-    # Fetch all active connection IDs
+    # Normalize and build chunked payloads
+    normalized = [n for ac in seen.values() if (n := normalize(ac))]
+    if not normalized:
+        return
+
+    # Split into chunks small enough to fit within API GW's 128 KB message limit
+    chunks: list[bytes] = []
+    for i in range(0, len(normalized), CHUNK_SIZE):
+        batch = normalized[i : i + CHUNK_SIZE]
+        chunks.append(json.dumps({"type": "aircraft_batch", "data": batch}).encode("utf-8"))
+
+    # Fetch active connections
     table = get_ddb().Table(CONNECTIONS_TABLE)
     scan_resp = table.scan(ProjectionExpression="connectionId")
     conn_ids: list[str] = [item["connectionId"] for item in scan_resp.get("Items", [])]
@@ -87,27 +114,11 @@ def handler(event, context):
     if not conn_ids:
         return
 
-    # Build messages and broadcast
-    apigw = get_apigw()
+    # Broadcast — one set of chunk calls per connection
     stale: set[str] = set()
-
-    for ac in aircraft_list:
-        msg = build_ws_message(ac)
-        if not msg:
-            continue
-        for conn_id in conn_ids:
-            if conn_id in stale:
-                continue
-            try:
-                apigw.post_to_connection(ConnectionId=conn_id, Data=msg)
-            except ClientError as e:
-                code = e.response["Error"]["Code"]
-                if code in ("GoneException", "410"):
-                    stale.add(conn_id)
-                else:
-                    print(f"post error {conn_id}: {e}")
-            except Exception as e:
-                print(f"post error {conn_id}: {e}")
+    for conn_id in conn_ids:
+        if send_to_connection(conn_id, chunks):
+            stale.add(conn_id)
 
     # Remove stale connections
     for conn_id in stale:
@@ -116,4 +127,7 @@ def handler(event, context):
         except Exception as e:
             print(f"cleanup error {conn_id}: {e}")
 
-    print(f"broadcast: aircraft={len(aircraft_list)} connections={len(conn_ids)} stale={len(stale)}")
+    print(
+        f"broadcast: aircraft={len(normalized)} chunks={len(chunks)} "
+        f"connections={len(conn_ids)} stale={len(stale)}"
+    )
