@@ -45,7 +45,7 @@ public class NormalizerHandler implements RequestHandler<KinesisEvent, String> {
     private static final double MIN_POSITION_DELTA_DEG = 0.01;
 
     private static final ConcurrentHashMap<String, Long> routeAgeCache = new ConcurrentHashMap<>();
-    private static final int MAX_ROUTE_LOOKUPS_PER_INVOCATION = 10;
+    private static final int MAX_ROUTE_LOOKUPS_PER_INVOCATION = 0;
 
     // Shared thread pool for parallel route lookups — sized to the lookup cap.
     private static final ExecutorService routeExecutor =
