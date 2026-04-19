@@ -18,13 +18,22 @@ interface AircraftData {
 }
 
 // ── plane icon, pointed in direction of travel ────────────────────────────────
-function planeIcon(track: number, onGround: boolean): L.DivIcon {
-  const color = onGround ? "#6b7280" : "#60a5fa";
-  const svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="20" height="20"
-    style="transform:rotate(${track}deg);filter:drop-shadow(0 1px 3px rgba(0,0,0,.7))">
-    <path fill="${color}" d="M12 2L8.5 10H3l2 2 4-.5V17l-3 1.5V20l6-1.5 6 1.5v-1.5L18 17v-5.5l4 .5 2-2h-5.5L12 2z"/>
+function altitudeColor(altitude: number, onGround: boolean): string {
+  if (onGround) return "#9ca3af";
+  if (altitude < 5000)  return "#fbbf24";
+  if (altitude < 15000) return "#fb923c";
+  if (altitude < 30000) return "#60a5fa";
+  return "#c084fc";
+}
+
+function planeIcon(track: number, onGround: boolean, altitude: number): L.DivIcon {
+  const color = altitudeColor(altitude, onGround);
+  // single cohesive top-down silhouette: swept wings + integrated tail fins
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="24" height="24"
+    style="transform:rotate(${track}deg);filter:drop-shadow(0 1px 3px rgba(0,0,0,.8))">
+    <path fill="${color}" d="M12 1 L13.5 9 L22 12 L13.5 14 L13 18 L17 23 L13 21 L12 22 L11 21 L7 23 L11 18 L10.5 14 L2 12 L10.5 9 Z"/>
   </svg>`;
-  return L.divIcon({ html: svg, className: "", iconSize: [20, 20], iconAnchor: [10, 10] });
+  return L.divIcon({ html: svg, className: "", iconSize: [24, 24], iconAnchor: [12, 12] });
 }
 
 // ── fetch aircraft for a bounding box ────────────────────────────────────────
@@ -60,9 +69,9 @@ function MarkersLayer({ aircraft }: { aircraft: Map<string, AircraftData> }) {
     // add / update
     aircraft.forEach((ac) => {
       const latlng: L.LatLngTuple = [ac.lat, ac.lon];
-      const icon = planeIcon(ac.track, ac.onGround);
+      const icon = planeIcon(ac.track, ac.onGround, ac.altitude);
       const popup = `
-        <div style="font:12px/1.7 monospace;min-width:140px">
+        <div style="font:12px/1.7 monospace;min-width:160px">
           <b style="font-size:13px">${ac.callsign || ac.icao24}</b><br>
           ${ac.onGround ? "<em>On ground</em>" : `${(ac.altitude ?? 0).toLocaleString()} ft`}<br>
           ${ac.groundSpeed ?? 0} kts &nbsp;·&nbsp; ${ac.track ?? 0}°<br>
