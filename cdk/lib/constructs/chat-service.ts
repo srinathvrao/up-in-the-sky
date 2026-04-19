@@ -2,11 +2,13 @@ import * as cdk from 'aws-cdk-lib';
 import { Construct } from 'constructs';
 import * as lambda from 'aws-cdk-lib/aws-lambda';
 import * as iam from 'aws-cdk-lib/aws-iam';
+import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
 import * as path from 'path';
 import { execSync } from 'child_process';
 
 interface ChatServiceProps {
   mcpLambdaArn: string;
+  aircraftTable: dynamodb.Table;
 }
 
 export class ChatService extends Construct {
@@ -62,6 +64,7 @@ export class ChatService extends Construct {
         MODEL_ID: 'claude-sonnet-4-20250514',
         MCP_LAMBDA_ARN: props.mcpLambdaArn,
         ANTHROPIC_API_KEY_PARAM: apiKeyParamName,
+        AIRCRAFT_TABLE_NAME: props.aircraftTable.tableName,
         AWS_LAMBDA_EXEC_WRAPPER: '/opt/bootstrap',
         AWS_LWA_INVOKE_MODE: 'response_stream',
         PORT: '8080',
@@ -77,6 +80,8 @@ export class ChatService extends Construct {
       actions: ['ssm:GetParameter'],
       resources: [`arn:aws:ssm:us-east-1:*:parameter${apiKeyParamName}`],
     }));
+
+    props.aircraftTable.grantReadData(this.lambdaFunction);
 
     this.functionUrl = this.lambdaFunction.addFunctionUrl({
       authType: lambda.FunctionUrlAuthType.NONE,

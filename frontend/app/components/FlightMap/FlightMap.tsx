@@ -1,7 +1,6 @@
 "use client";
 
 import dynamic from "next/dynamic";
-import { useWebSocket } from "@/app/hooks/useWebSocket";
 
 const FlightMapInner = dynamic(() => import("./FlightMapInner"), {
   ssr: false,
@@ -12,9 +11,8 @@ const FlightMapInner = dynamic(() => import("./FlightMapInner"), {
   ),
 });
 
-const WS_URL = process.env.NEXT_PUBLIC_API_WS_URL;
+const API_URL = process.env.NEXT_PUBLIC_API_HTTP_URL ?? "";
 
 export function FlightMap() {
-  const { aircraft, status } = useWebSocket(WS_URL);
-  return <FlightMapInner aircraft={aircraft} status={status} />;
+  return <FlightMapInner apiUrl={API_URL} />;
 }

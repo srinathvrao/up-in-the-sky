@@ -1,15 +1,25 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, useCallback } from "react";
 import { MapContainer, TileLayer, useMapEvents } from "react-leaflet";
 import * as L from "leaflet";
 import "leaflet/dist/leaflet.css";
-import type { AircraftData } from "@/app/hooks/useWebSocket";
 
-// ── plane SVG icon, pointed in direction of travel ────────────────────────────
+interface AircraftData {
+  icao24: string;
+  callsign: string;
+  lat: number;
+  lon: number;
+  altitude: number;
+  groundSpeed: number;
+  track: number;
+  onGround: boolean;
+  updatedAt: string;
+}
+
+// ── plane icon, pointed in direction of travel ────────────────────────────────
 function planeIcon(track: number, onGround: boolean): L.DivIcon {
   const color = onGround ? "#6b7280" : "#60a5fa";
-  // SVG drawn nose-up (0°), CSS rotate aligns it to track heading
   const svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="20" height="20"
     style="transform:rotate(${track}deg);filter:drop-shadow(0 1px 3px rgba(0,0,0,.7))">
     <path fill="${color}" d="M12 2L8.5 10H3l2 2 4-.5V17l-3 1.5V20l6-1.5 6 1.5v-1.5L18 17v-5.5l4 .5 2-2h-5.5L12 2z"/>
@@ -17,95 +27,147 @@ function planeIcon(track: number, onGround: boolean): L.DivIcon {
   return L.divIcon({ html: svg, className: "", iconSize: [20, 20], iconAnchor: [10, 10] });
 }
 
-// ── imperative marker layer — no React component per aircraft ─────────────────
-function MarkersLayer({ aircraft, bounds }: { aircraft: Map<string, AircraftData>; bounds: L.LatLngBounds | null }) {
+// ── fetch aircraft for a bounding box ────────────────────────────────────────
+async function fetchAircraft(
+  apiUrl: string,
+  bounds: L.LatLngBounds,
+): Promise<AircraftData[]> {
+  const params = new URLSearchParams({
+    min_lat: bounds.getSouth().toFixed(6),
+    max_lat: bounds.getNorth().toFixed(6),
+    min_lon: bounds.getWest().toFixed(6),
+    max_lon: bounds.getEast().toFixed(6),
+  });
+  const res = await fetch(`${apiUrl}/aircraft?${params}`);
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  const json = await res.json();
+  return json.aircraft as AircraftData[];
+}
+
+// ── imperative marker layer ───────────────────────────────────────────────────
+function MarkersLayer({ aircraft }: { aircraft: Map<string, AircraftData> }) {
   const map = useMapEvents({});
   const markers = useRef<Map<string, L.Marker>>(new Map());
 
   useEffect(() => {
-    const visible = new Set<string>();
-    aircraft.forEach((ac) => {
-      if (bounds && !bounds.contains([ac.lat, ac.lon])) return;
-      visible.add(ac.icao24);
+    const visible = new Set(aircraft.keys());
 
+    // remove departed aircraft
+    markers.current.forEach((m, id) => {
+      if (!visible.has(id)) { m.remove(); markers.current.delete(id); }
+    });
+
+    // add / update
+    aircraft.forEach((ac) => {
       const latlng: L.LatLngTuple = [ac.lat, ac.lon];
       const icon = planeIcon(ac.track, ac.onGround);
-      const popupHtml = `
+      const popup = `
         <div style="font:12px/1.7 monospace;min-width:140px">
           <b style="font-size:13px">${ac.callsign || ac.icao24}</b><br>
-          ${ac.onGround ? "<em>On ground</em>" : `${ac.altitude.toLocaleString()} ft`}<br>
-          ${ac.groundSpeed} kts &nbsp;·&nbsp; ${ac.track}°<br>
+          ${ac.onGround ? "<em>On ground</em>" : `${(ac.altitude ?? 0).toLocaleString()} ft`}<br>
+          ${ac.groundSpeed ?? 0} kts &nbsp;·&nbsp; ${ac.track ?? 0}°<br>
           <span style="color:#9ca3af;font-size:11px">${ac.icao24}</span>
         </div>`;
 
       const existing = markers.current.get(ac.icao24);
       if (existing) {
         existing.setLatLng(latlng).setIcon(icon);
-        existing.getPopup()?.setContent(popupHtml);
+        existing.getPopup()?.setContent(popup);
       } else {
         const m = L.marker(latlng, { icon })
-          .bindPopup(popupHtml, { closeButton: false, maxWidth: 220 })
+          .bindPopup(popup, { closeButton: false, maxWidth: 220 })
           .addTo(map);
         markers.current.set(ac.icao24, m);
       }
     });
-
-    // remove markers that left bounds or disappeared
-    markers.current.forEach((m, id) => {
-      if (!visible.has(id)) { m.remove(); markers.current.delete(id); }
-    });
-  }, [aircraft, bounds, map]);
+  }, [aircraft, map]);
 
   useEffect(() => () => { markers.current.forEach((m) => m.remove()); }, []);
 
   return null;
 }
 
-// ── fires onBoundsChange whenever the map is moved or zoomed ──────────────────
-function BoundsTracker({ onChange }: { onChange: (b: L.LatLngBounds) => void }) {
+// ── fires fetch on pan/zoom end ───────────────────────────────────────────────
+function BoundsWatcher({ onBoundsChange }: { onBoundsChange: (b: L.LatLngBounds) => void }) {
   const map = useMapEvents({
-    moveend: () => onChange(map.getBounds()),
-    zoomend: () => onChange(map.getBounds()),
+    moveend: () => onBoundsChange(map.getBounds()),
+    zoomend: () => onBoundsChange(map.getBounds()),
   });
-  useEffect(() => { onChange(map.getBounds()); }, [map, onChange]);
+  // fire once on mount to load initial view
+  useEffect(() => { onBoundsChange(map.getBounds()); }, [map, onBoundsChange]);
   return null;
 }
 
-// ── top-left status pill ──────────────────────────────────────────────────────
-function StatusPill({ status, count }: { status: string; count: number }) {
+// ── status bar ────────────────────────────────────────────────────────────────
+type LoadState = "idle" | "loading" | "error";
+
+function StatusBar({ count, state }: { count: number; state: LoadState }) {
   const cls =
-    status === "connected"   ? "bg-green-950/90 text-green-300 border-green-800" :
-    status === "reconnecting"? "bg-yellow-950/90 text-yellow-300 border-yellow-800" :
-                               "bg-gray-900/90 text-gray-400 border-gray-700";
+    state === "loading" ? "bg-blue-950/90 text-blue-300 border-blue-800" :
+    state === "error"   ? "bg-red-950/90 text-red-300 border-red-800" :
+                          "bg-gray-900/90 text-gray-300 border-gray-700";
   return (
     <div className={`absolute top-3 left-3 z-[1000] flex items-center gap-1.5 px-3 py-1.5 rounded-lg border text-xs font-medium ${cls}`}>
-      <span className={`w-1.5 h-1.5 rounded-full ${status === "connected" ? "bg-green-400 animate-pulse" : status === "reconnecting" ? "bg-yellow-400 animate-pulse" : "bg-gray-500"}`} />
-      {status === "connected" ? `${count} aircraft in view` : status === "reconnecting" ? "Reconnecting…" : "Disconnected"}
+      {state === "loading" && <span className="w-1.5 h-1.5 rounded-full bg-blue-400 animate-pulse" />}
+      {state === "idle"    && <span className="w-1.5 h-1.5 rounded-full bg-green-400" />}
+      {state === "error"   && <span className="w-1.5 h-1.5 rounded-full bg-red-400" />}
+      {state === "loading" ? "Loading…" : state === "error" ? "Fetch error" : `${count} aircraft in view`}
     </div>
   );
 }
 
-// ── root export ───────────────────────────────────────────────────────────────
+// ── root ──────────────────────────────────────────────────────────────────────
 const NYC: L.LatLngTuple = [40.7128, -74.006];
+const REFRESH_MS = 8000;
 
-export default function FlightMapInner({ aircraft, status }: { aircraft: Map<string, AircraftData>; status: string }) {
-  const [bounds, setBounds] = useState<L.LatLngBounds | null>(null);
+export default function FlightMapInner({ apiUrl }: { apiUrl: string }) {
+  const [aircraft, setAircraft] = useState<Map<string, AircraftData>>(new Map());
+  const [loadState, setLoadState] = useState<LoadState>("idle");
+  const boundsRef = useRef<L.LatLngBounds | null>(null);
+  const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  const visibleCount = bounds
-    ? Array.from(aircraft.values()).filter((ac) => bounds.contains([ac.lat, ac.lon])).length
-    : aircraft.size;
+  const load = useCallback(async (bounds: L.LatLngBounds) => {
+    if (!apiUrl) return;
+    setLoadState("loading");
+    try {
+      const data = await fetchAircraft(apiUrl, bounds);
+      const map = new Map<string, AircraftData>();
+      data.forEach((ac) => map.set(ac.icao24, ac));
+      setAircraft(map);
+      setLoadState("idle");
+    } catch (e) {
+      console.error("aircraft fetch:", e);
+      setLoadState("error");
+    }
+  }, [apiUrl]);
+
+  const onBoundsChange = useCallback((bounds: L.LatLngBounds) => {
+    boundsRef.current = bounds;
+    if (timerRef.current) clearTimeout(timerRef.current);
+    load(bounds);
+    // schedule periodic refresh for the current view
+    const schedule = () => {
+      timerRef.current = setTimeout(async () => {
+        if (boundsRef.current) await load(boundsRef.current);
+        schedule();
+      }, REFRESH_MS);
+    };
+    schedule();
+  }, [load]);
+
+  useEffect(() => () => { if (timerRef.current) clearTimeout(timerRef.current); }, []);
 
   return (
     <div className="relative w-full h-full">
-      <StatusPill status={status} count={visibleCount} />
+      <StatusBar count={aircraft.size} state={loadState} />
       <MapContainer center={NYC} zoom={10} className="w-full h-full" zoomControl={false}>
         <TileLayer
           url="https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png"
           attribution='&copy; <a href="https://openstreetmap.org/copyright">OpenStreetMap</a> &copy; <a href="https://carto.com">CARTO</a>'
           maxZoom={19}
         />
-        <BoundsTracker onChange={setBounds} />
-        <MarkersLayer aircraft={aircraft} bounds={bounds} />
+        <BoundsWatcher onBoundsChange={onBoundsChange} />
+        <MarkersLayer aircraft={aircraft} />
       </MapContainer>
     </div>
   );
