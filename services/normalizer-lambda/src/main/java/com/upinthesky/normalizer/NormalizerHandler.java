@@ -3,6 +3,7 @@ package com.upinthesky.normalizer;
 import com.amazonaws.services.lambda.runtime.Context;
 import com.amazonaws.services.lambda.runtime.RequestHandler;
 import com.amazonaws.services.lambda.runtime.events.KinesisEvent;
+import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.upinthesky.normalizer.model.Aircraft;
 import com.upinthesky.normalizer.model.RouteInfo;
@@ -15,8 +16,11 @@ import software.amazon.awssdk.services.dynamodb.model.PutItemRequest;
 
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
+import java.util.Collections;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 
 public class NormalizerHandler implements RequestHandler<KinesisEvent, String> {
 
@@ -24,34 +28,82 @@ public class NormalizerHandler implements RequestHandler<KinesisEvent, String> {
             .region(Region.of(System.getenv().getOrDefault("AWS_REGION", "us-east-1")))
             .build();
     private static final ObjectMapper mapper = new ObjectMapper();
+    private static final TypeReference<List<Aircraft>> AIRCRAFT_LIST = new TypeReference<>() {};
     private static final String TABLE_NAME = System.getenv("AIRCRAFT_TABLE_NAME");
     private static final long TTL_SECONDS = 24 * 3600L;
     private static final long ROUTE_REFRESH_SECONDS = 3600L;
+
+    // In-memory dedup cache: icao24 → [lastWriteEpochSec, latBits, lonBits]
+    // Skips DynamoDB write when position hasn't changed meaningfully.
+    private static final ConcurrentHashMap<String, long[]> writeCache = new ConcurrentHashMap<>();
+    private static final long MIN_WRITE_INTERVAL_SEC = 30;
+    private static final double MIN_POSITION_DELTA_DEG = 0.01; // ~1 km
 
     private final RouteEnricher routeEnricher = new RouteEnricher();
 
     @Override
     public String handleRequest(KinesisEvent event, Context context) {
         int processed = 0;
+        int skipped = 0;
         int errors = 0;
 
         for (KinesisEvent.KinesisEventRecord record : event.getRecords()) {
             try {
                 byte[] data = record.getKinesis().getData().array();
-                String json = new String(data, StandardCharsets.UTF_8);
-                Aircraft aircraft = mapper.readValue(json, Aircraft.class);
+                String json = new String(data, StandardCharsets.UTF_8).trim();
 
-                if (aircraft.getHex() == null || aircraft.getHex().isBlank()) continue;
-                if (aircraft.getLat() == null || aircraft.getLon() == null) continue;
+                List<Aircraft> batch = json.startsWith("[")
+                        ? mapper.readValue(json, AIRCRAFT_LIST)
+                        : Collections.singletonList(mapper.readValue(json, Aircraft.class));
 
-                upsertAircraft(aircraft, context);
-                processed++;
+                for (Aircraft aircraft : batch) {
+                    if (aircraft.getHex() == null || aircraft.getHex().isBlank()) continue;
+                    if (aircraft.getLat() == null || aircraft.getLon() == null) continue;
+
+                    if (shouldWrite(aircraft.getHex().toLowerCase(), aircraft.getLat(), aircraft.getLon())) {
+                        upsertAircraft(aircraft, context);
+                        processed++;
+                    } else {
+                        skipped++;
+                    }
+                }
             } catch (Exception e) {
                 errors++;
                 context.getLogger().log("Normalize error: " + e.getMessage() + "\n");
             }
         }
-        return String.format("processed=%d errors=%d", processed, errors);
+        context.getLogger().log(String.format("processed=%d skipped=%d errors=%d%n", processed, skipped, errors));
+        return String.format("processed=%d skipped=%d errors=%d", processed, skipped, errors);
+    }
+
+    private boolean shouldWrite(String icao24, double lat, double lon) {
+        long now = Instant.now().getEpochSecond();
+        long[] cached = writeCache.get(icao24);
+        if (cached == null) {
+            updateCache(icao24, lat, lon, now);
+            return true;
+        }
+        long lastWrite = cached[0];
+        double lastLat = Double.longBitsToDouble(cached[1]);
+        double lastLon = Double.longBitsToDouble(cached[2]);
+
+        boolean stale = (now - lastWrite) >= MIN_WRITE_INTERVAL_SEC;
+        boolean moved = Math.abs(lat - lastLat) >= MIN_POSITION_DELTA_DEG
+                || Math.abs(lon - lastLon) >= MIN_POSITION_DELTA_DEG;
+
+        if (stale || moved) {
+            updateCache(icao24, lat, lon, now);
+            return true;
+        }
+        return false;
+    }
+
+    private void updateCache(String icao24, double lat, double lon, long epochSec) {
+        writeCache.put(icao24, new long[]{
+                epochSec,
+                Double.doubleToLongBits(lat),
+                Double.doubleToLongBits(lon)
+        });
     }
 
     private void upsertAircraft(Aircraft a, Context context) {
@@ -64,9 +116,7 @@ public class NormalizerHandler implements RequestHandler<KinesisEvent, String> {
         item.put("updatedAt", str(Instant.now().toString()));
         item.put("ttl", num(String.valueOf(now + TTL_SECONDS)));
 
-        if (callsign != null && !callsign.isBlank()) {
-            item.put("callsign", str(callsign));
-        }
+        if (callsign != null && !callsign.isBlank()) item.put("callsign", str(callsign));
         if (a.getLat() != null) item.put("lat", num(String.valueOf(a.getLat())));
         if (a.getLon() != null) item.put("lon", num(String.valueOf(a.getLon())));
         if (a.getAltitudeFeet() != null) item.put("altitude", num(String.valueOf(a.getAltitudeFeet())));
@@ -74,7 +124,6 @@ public class NormalizerHandler implements RequestHandler<KinesisEvent, String> {
         if (a.getTrack() != null) item.put("track", num(String.valueOf(a.getTrack())));
         item.put("onGround", bool(a.isOnGround()));
 
-        // Route enrichment: fetch on first sight or if routeUpdatedAt is > 1 hour old
         if (callsign != null && !callsign.isBlank() && shouldRefreshRoute(icao24, now)) {
             try {
                 RouteInfo route = routeEnricher.fetchRoute(callsign);
@@ -87,7 +136,6 @@ public class NormalizerHandler implements RequestHandler<KinesisEvent, String> {
                 context.getLogger().log("Route enrichment failed for " + callsign + ": " + e.getMessage() + "\n");
             }
         } else {
-            // Preserve existing route fields — only update position fields
             Map<String, AttributeValue> existing = getExistingRoute(icao24);
             if (existing != null) {
                 if (existing.containsKey("origin")) item.put("origin", existing.get("origin"));
@@ -96,18 +144,14 @@ public class NormalizerHandler implements RequestHandler<KinesisEvent, String> {
             }
         }
 
-        dynamoDb.putItem(PutItemRequest.builder()
-                .tableName(TABLE_NAME)
-                .item(item)
-                .build());
+        dynamoDb.putItem(PutItemRequest.builder().tableName(TABLE_NAME).item(item).build());
     }
 
     private boolean shouldRefreshRoute(String icao24, long nowEpochSeconds) {
         Map<String, AttributeValue> existing = getExistingRoute(icao24);
         if (existing == null || !existing.containsKey("routeUpdatedAt")) return true;
         try {
-            String routeUpdatedAt = existing.get("routeUpdatedAt").s();
-            long routeAge = nowEpochSeconds - Instant.parse(routeUpdatedAt).getEpochSecond();
+            long routeAge = nowEpochSeconds - Instant.parse(existing.get("routeUpdatedAt").s()).getEpochSecond();
             return routeAge > ROUTE_REFRESH_SECONDS;
         } catch (Exception e) {
             return true;
@@ -127,15 +171,7 @@ public class NormalizerHandler implements RequestHandler<KinesisEvent, String> {
         }
     }
 
-    private static AttributeValue str(String s) {
-        return AttributeValue.builder().s(s).build();
-    }
-
-    private static AttributeValue num(String n) {
-        return AttributeValue.builder().n(n).build();
-    }
-
-    private static AttributeValue bool(boolean b) {
-        return AttributeValue.builder().bool(b).build();
-    }
+    private static AttributeValue str(String s) { return AttributeValue.builder().s(s).build(); }
+    private static AttributeValue num(String n) { return AttributeValue.builder().n(n).build(); }
+    private static AttributeValue bool(boolean b) { return AttributeValue.builder().bool(b).build(); }
 }
