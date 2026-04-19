@@ -55,25 +55,28 @@ def get_lambda_client():
 
 TOOLS = [
     {
-        "name": "get_flight_status",
+        "name": "get_aircraft_position",
         "description": (
             "Get real-time position, altitude, speed, and heading for an aircraft "
-            "by its callsign or flight number (e.g. AAL123, UAL456)."
+            "by its callsign (e.g. AAL123) or ICAO24 hex code (e.g. a1b2c3)."
         ),
         "input_schema": {
             "type": "object",
             "properties": {
                 "callsign": {
                     "type": "string",
-                    "description": "ICAO callsign or flight number",
-                }
+                    "description": "ICAO callsign or flight number (e.g. AAL123)",
+                },
+                "icao24": {
+                    "type": "string",
+                    "description": "ICAO24 hex transponder code (e.g. a1b2c3)",
+                },
             },
-            "required": ["callsign"],
         },
     },
     {
-        "name": "get_aircraft_in_area",
-        "description": "Get all aircraft currently visible in a geographic bounding area.",
+        "name": "get_aircraft_nearby",
+        "description": "Get all aircraft currently visible within a radius of a geographic point.",
         "input_schema": {
             "type": "object",
             "properties": {
@@ -94,23 +97,22 @@ SYSTEM_PROMPT = (
 )
 
 MOCK_TOOL_RESPONSES: dict[str, dict] = {
-    "get_flight_status": {
-        "callsign": "UNKNOWN",
-        "altitude_ft": 35000,
-        "speed_kts": 450,
-        "heading": 270,
-        "lat": 39.5,
-        "lon": -98.0,
-        "note": "mock data — MCP Lambda not configured",
+    "get_aircraft_position": {
+        "result": {
+            "callsign": "UNKNOWN",
+            "altitude": 35000,
+            "groundSpeed": 450,
+            "track": 270,
+            "lat": 39.5,
+            "lon": -98.0,
+        }
     },
-    "get_aircraft_in_area": {
-        "count": 3,
-        "aircraft": [
-            {"callsign": "AAL123", "altitude_ft": 38000, "speed_kts": 480},
-            {"callsign": "UAL456", "altitude_ft": 32000, "speed_kts": 460},
-            {"callsign": "DAL789", "altitude_ft": 41000, "speed_kts": 490},
-        ],
-        "note": "mock data — MCP Lambda not configured",
+    "get_aircraft_nearby": {
+        "result": [
+            {"callsign": "AAL123", "altitude": 38000, "groundSpeed": 480},
+            {"callsign": "UAL456", "altitude": 32000, "groundSpeed": 460},
+            {"callsign": "DAL789", "altitude": 41000, "groundSpeed": 490},
+        ]
     },
 }
 
@@ -132,8 +134,9 @@ def sse(event_type: str, data: dict) -> bytes:
 def invoke_tool(tool_name: str, tool_input: dict) -> str:
     if not MCP_LAMBDA_ARN:
         mock = dict(MOCK_TOOL_RESPONSES.get(tool_name, {"error": f"unknown tool: {tool_name}"}))
-        if tool_name == "get_flight_status":
-            mock["callsign"] = tool_input.get("callsign", "UNKNOWN")
+        if tool_name == "get_aircraft_position" and "result" in mock:
+            mock = {"result": dict(mock["result"])}
+            mock["result"]["callsign"] = tool_input.get("callsign") or tool_input.get("icao24", "UNKNOWN")
         return json.dumps(mock)
     try:
         resp = get_lambda_client().invoke(
