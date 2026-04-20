@@ -113,7 +113,36 @@ public class NormalizerHandler implements RequestHandler<KinesisEvent, String> {
         if (a.getGs() != null) item.put("groundSpeed", num(String.valueOf(a.getGs())));
         if (a.getTrack() != null) item.put("track", num(String.valueOf(a.getTrack())));
         item.put("onGround", bool(a.isOnGround()));
+        if (a.getLat() != null && a.getLon() != null) {
+            item.put("gh2", str(geohash(a.getLat(), a.getLon(), 2)));
+        }
         return item;
+    }
+
+    // Encodes (lat, lon) to a Niemeyer base-32 geohash of the given precision.
+    private static final char[] BASE32 = "0123456789bcdefghjkmnpqrstuvwxyz".toCharArray();
+
+    private static String geohash(double lat, double lon, int precision) {
+        double minLat = -90.0, maxLat = 90.0;
+        double minLon = -180.0, maxLon = 180.0;
+        int bits = 0;
+        int hashValue = 0;
+        boolean isLon = true;
+        StringBuilder sb = new StringBuilder(precision);
+        while (sb.length() < precision) {
+            if (isLon) {
+                double mid = (minLon + maxLon) / 2;
+                if (lon >= mid) { hashValue = (hashValue << 1) | 1; minLon = mid; }
+                else             { hashValue <<= 1;                   maxLon = mid; }
+            } else {
+                double mid = (minLat + maxLat) / 2;
+                if (lat >= mid) { hashValue = (hashValue << 1) | 1; minLat = mid; }
+                else             { hashValue <<= 1;                   maxLat = mid; }
+            }
+            isLon = !isLon;
+            if (++bits == 5) { sb.append(BASE32[hashValue]); bits = 0; hashValue = 0; }
+        }
+        return sb.toString();
     }
 
     private int enrichRoutes(List<Map<String, AttributeValue>> items, long now, Context context) {
