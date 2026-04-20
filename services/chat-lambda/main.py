@@ -3,7 +3,8 @@ import os
 import time
 import boto3
 import anthropic
-from boto3.dynamodb.conditions import Attr
+from boto3.dynamodb.conditions import Attr, Key
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from decimal import Decimal
 from fastapi import FastAPI, Query
 from fastapi.responses import StreamingResponse
@@ -245,6 +246,63 @@ def decimal_to_float(obj):
     return obj
 
 
+# Precision-2 geohash cell dimensions.
+# 10 bits: 5 lon bits → 360/32 = 11.25° wide, 5 lat bits → 180/32 = 5.625° tall.
+_GH2_CELL_LAT = 180.0 / 32
+_GH2_CELL_LON = 360.0 / 32
+_BASE32 = "0123456789bcdefghjkmnpqrstuvwxyz"
+
+
+def _encode_gh2(lat: float, lon: float) -> str:
+    min_lat, max_lat = -90.0, 90.0
+    min_lon, max_lon = -180.0, 180.0
+    bits = 0
+    hash_val = 0
+    is_lon = True
+    result: list[str] = []
+    while len(result) < 2:
+        if is_lon:
+            mid = (min_lon + max_lon) / 2
+            if lon >= mid:
+                hash_val = (hash_val << 1) | 1
+                min_lon = mid
+            else:
+                hash_val <<= 1
+                max_lon = mid
+        else:
+            mid = (min_lat + max_lat) / 2
+            if lat >= mid:
+                hash_val = (hash_val << 1) | 1
+                min_lat = mid
+            else:
+                hash_val <<= 1
+                max_lat = mid
+        is_lon = not is_lon
+        bits += 1
+        if bits == 5:
+            result.append(_BASE32[hash_val])
+            bits = 0
+            hash_val = 0
+    return "".join(result)
+
+
+def _gh2_cells_in_bbox(
+    min_lat: float, max_lat: float, min_lon: float, max_lon: float
+) -> list[str]:
+    # Snap to the SW corner of the geohash grid cell that contains the SW viewport corner.
+    sw_lat = int((min_lat + 90) / _GH2_CELL_LAT) * _GH2_CELL_LAT - 90
+    sw_lon = int((min_lon + 180) / _GH2_CELL_LON) * _GH2_CELL_LON - 180
+    cells: list[str] = []
+    lat = sw_lat
+    while lat < max_lat:
+        lon = sw_lon
+        while lon < max_lon:
+            cells.append(_encode_gh2(lat + _GH2_CELL_LAT / 2, lon + _GH2_CELL_LON / 2))
+            lon += _GH2_CELL_LON
+        lat += _GH2_CELL_LAT
+    return cells
+
+
 @app.get("/aircraft")
 async def get_aircraft(
     min_lat: float = Query(...),
@@ -254,26 +312,43 @@ async def get_aircraft(
 ):
     table = get_aircraft_table()
     now = int(time.time())
+    cells = _gh2_cells_in_bbox(min_lat, max_lat, min_lon, max_lon)
 
-    items: list[dict] = []
-    kwargs: dict = {
-        "FilterExpression": (
-            Attr("lat").between(Decimal(str(min_lat)), Decimal(str(max_lat)))
-            & Attr("lon").between(Decimal(str(min_lon)), Decimal(str(max_lon)))
-            & Attr("ttl").gt(now)
-        ),
-        "ProjectionExpression": "icao24, callsign, lat, lon, altitude, groundSpeed, track, onGround, updatedAt",
-    }
+    def _query_cell(cell: str) -> list[dict]:
+        items: list[dict] = []
+        kwargs: dict = {
+            "IndexName": "gh2-index",
+            "KeyConditionExpression": Key("gh2").eq(cell),
+            "ProjectionExpression": "icao24, callsign, lat, lon, altitude, groundSpeed, track, onGround, updatedAt, #ttl",
+            "ExpressionAttributeNames": {"#ttl": "ttl"},
+        }
+        while True:
+            resp = table.query(**kwargs)
+            items.extend(resp.get("Items", []))
+            last_key = resp.get("LastEvaluatedKey")
+            if not last_key:
+                break
+            kwargs["ExclusiveStartKey"] = last_key
+        return items
 
-    while True:
-        resp = table.scan(**kwargs)
-        items.extend(resp.get("Items", []))
-        last_key = resp.get("LastEvaluatedKey")
-        if not last_key:
-            break
-        kwargs["ExclusiveStartKey"] = last_key
+    all_items: list[dict] = []
+    max_workers = min(len(cells), 20)
+    with ThreadPoolExecutor(max_workers=max_workers) as pool:
+        futures = {pool.submit(_query_cell, cell): cell for cell in cells}
+        for future in as_completed(futures):
+            all_items.extend(future.result())
 
-    return {"aircraft": decimal_to_float(items)}
+    # Filter to the exact viewport bounds and exclude TTL-expired items.
+    filtered = [
+        item for item in all_items
+        if (
+            min_lat <= float(item["lat"]) <= max_lat
+            and min_lon <= float(item["lon"]) <= max_lon
+            and int(item.get("ttl", 0)) > now
+        )
+    ]
+
+    return {"aircraft": decimal_to_float(filtered)}
 
 
 @app.get("/health")

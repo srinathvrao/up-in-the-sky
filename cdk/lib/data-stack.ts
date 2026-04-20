@@ -42,6 +42,15 @@ export class DataStack extends cdk.Stack {
       projectionType: dynamodb.ProjectionType.ALL,
     });
 
+    // GSI for viewport queries — partition by 2-char geohash cell (~5.6° × 11.25°).
+    // Replaces full-table scans with a handful of targeted parallel queries.
+    this.aircraftTable.addGlobalSecondaryIndex({
+      indexName: 'gh2-index',
+      partitionKey: { name: 'gh2', type: dynamodb.AttributeType.STRING },
+      projectionType: dynamodb.ProjectionType.INCLUDE,
+      nonKeyAttributes: ['callsign', 'lat', 'lon', 'altitude', 'groundSpeed', 'track', 'onGround', 'updatedAt', 'ttl'],
+    });
+
     // S3 archive bucket for Firehose
     this.archiveBucket = new s3.Bucket(this, 'PositionsArchive', {
       bucketName: `up-in-the-sky-positions-${this.account}-${this.region}`,
