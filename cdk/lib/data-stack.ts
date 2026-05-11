@@ -35,6 +35,22 @@ export class DataStack extends cdk.Stack {
       removalPolicy: cdk.RemovalPolicy.DESTROY,
     });
 
+    // GSI for callsign lookups (used by MCP get_aircraft_position tool)
+    this.aircraftTable.addGlobalSecondaryIndex({
+      indexName: 'callsign-index',
+      partitionKey: { name: 'callsign', type: dynamodb.AttributeType.STRING },
+      projectionType: dynamodb.ProjectionType.ALL,
+    });
+
+    // GSI for viewport queries — partition by 2-char geohash cell (~5.6° × 11.25°).
+    // Replaces full-table scans with a handful of targeted parallel queries.
+    this.aircraftTable.addGlobalSecondaryIndex({
+      indexName: 'gh2-index',
+      partitionKey: { name: 'gh2', type: dynamodb.AttributeType.STRING },
+      projectionType: dynamodb.ProjectionType.INCLUDE,
+      nonKeyAttributes: ['callsign', 'lat', 'lon', 'altitude', 'groundSpeed', 'track', 'onGround', 'updatedAt', 'ttl'],
+    });
+
     // S3 archive bucket for Firehose
     this.archiveBucket = new s3.Bucket(this, 'PositionsArchive', {
       bucketName: `up-in-the-sky-positions-${this.account}-${this.region}`,
@@ -70,7 +86,7 @@ export class DataStack extends cdk.Stack {
     }));
 
     // Firehose: Kinesis → S3, partitioned by time, 5-min or 128MB buffers
-    new firehose.CfnDeliveryStream(this, 'FlightFirehose', {
+    const flightFirehose = new firehose.CfnDeliveryStream(this, 'FlightFirehose', {
       deliveryStreamType: 'KinesisStreamAsSource',
       kinesisStreamSourceConfiguration: {
         kinesisStreamArn: this.stream.streamArn,
@@ -93,24 +109,21 @@ export class DataStack extends cdk.Stack {
         },
       },
     });
+    // Firehose validates IAM at creation time — ensure the role's DefaultPolicy
+    // is fully applied before CloudFormation attempts to create the delivery stream.
+    const firehoseDefaultPolicy = firehoseRole.node.tryFindChild('DefaultPolicy') as iam.Policy;
+    if (firehoseDefaultPolicy) {
+      flightFirehose.node.addDependency(firehoseDefaultPolicy);
+    }
 
     // Poller Lambda — runs for 55s per invocation, polls adsb.lol every 2s
     const pollerLambda = new lambda.Function(this, 'PollerLambda', {
       functionName: 'flight-poller',
       runtime: lambda.Runtime.JAVA_21,
       handler: 'com.upinthesky.poller.PollerHandler::handleRequest',
-      code: lambda.Code.fromAsset(path.join(__dirname, '../../services/poller-lambda'), {
-        bundling: {
-          image: lambda.Runtime.JAVA_21.bundlingImage,
-          command: [
-            '/bin/sh', '-c',
-            'mvn clean package -q -DskipTests -Dmaven.repo.local=/tmp/m2 && cp target/poller-lambda.jar /asset-output/',
-          ],
-        },
-      }),
+      code: lambda.Code.fromAsset(path.join(__dirname, '../../services/poller-lambda/target/poller-lambda.jar')),
       timeout: cdk.Duration.seconds(60),
-      memorySize: 512,
-      reservedConcurrentExecutions: 1,
+      memorySize: 256,
       environment: {
         KINESIS_STREAM_NAME: this.stream.streamName,
         POLL_CENTER_LAT: '39.0',
@@ -132,16 +145,8 @@ export class DataStack extends cdk.Stack {
       functionName: 'flight-normalizer',
       runtime: lambda.Runtime.JAVA_21,
       handler: 'com.upinthesky.normalizer.NormalizerHandler::handleRequest',
-      code: lambda.Code.fromAsset(path.join(__dirname, '../../services/normalizer-lambda'), {
-        bundling: {
-          image: lambda.Runtime.JAVA_21.bundlingImage,
-          command: [
-            '/bin/sh', '-c',
-            'mvn clean package -q -DskipTests -Dmaven.repo.local=/tmp/m2 && cp target/normalizer-lambda.jar /asset-output/',
-          ],
-        },
-      }),
-      timeout: cdk.Duration.seconds(60),
+      code: lambda.Code.fromAsset(path.join(__dirname, '../../services/normalizer-lambda/target/normalizer-lambda.jar')),
+      timeout: cdk.Duration.seconds(300),
       memorySize: 512,
       environment: {
         AIRCRAFT_TABLE_NAME: this.aircraftTable.tableName,
@@ -149,10 +154,11 @@ export class DataStack extends cdk.Stack {
     });
     this.aircraftTable.grantReadWriteData(normalizerLambda);
 
-    // Kinesis event source: batch size 100, bisect on error for resilience
+    // Kinesis event source: smaller batch + 10s window keeps invocations well under timeout
     normalizerLambda.addEventSource(new lambdaEventSources.KinesisEventSource(this.stream, {
       startingPosition: lambda.StartingPosition.LATEST,
-      batchSize: 100,
+      batchSize: 50,
+      maxBatchingWindow: cdk.Duration.seconds(10),
       bisectBatchOnError: true,
     }));
   }
